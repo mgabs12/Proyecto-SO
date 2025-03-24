@@ -1,0 +1,278 @@
+import java.util.Scanner;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.Random;
+
+public class FilosofosComensales {
+    public static void main(String[] args) {
+        final int NUM_FILOSOFOS = 5;
+        final int COMIDAS_POR_FILOSOFO = 3;
+        
+        Mesa mesa = new Mesa(NUM_FILOSOFOS);
+        Thread[] hilosFilosofos = new Thread[NUM_FILOSOFOS];
+        
+        // Crear y ejecutar los hilos de los filósofos
+        for (int i = 0; i < NUM_FILOSOFOS; i++) {
+            final int id = i;
+            hilosFilosofos[i] = new Thread(() -> {
+                mesa.filosofo(id, COMIDAS_POR_FILOSOFO);
+            });
+            hilosFilosofos[i].start();
+        }
+        
+        // Hilo para mostrar periódicamente el estado
+        Thread hiloMonitor = new Thread(() -> {
+            while (!mesa.todosTerminados()) {
+                try {
+                    Thread.sleep(2000);
+                    mesa.mostrarEstado();
+                } catch (InterruptedException e) {
+                    System.err.println("Hilo monitor interrumpido: " + e.getMessage());
+                    break;
+                }
+            }
+        });
+        hiloMonitor.start();
+        
+        // Esperar a que el usuario decida terminar
+        System.out.println("\nPresione Enter para terminar la simulación...");
+        Scanner scanner = new Scanner(System.in);
+        scanner.nextLine();
+        scanner.close();
+        
+        // Detener la simulación
+        mesa.detener();
+        
+        // Esperar a que todos los hilos terminen
+        for (Thread t : hilosFilosofos) {
+            try {
+                t.join();
+            } catch (InterruptedException e) {
+                System.err.println("Error al esperar a un filósofo: " + e.getMessage());
+            }
+        }
+        
+        try {
+            hiloMonitor.join();
+        } catch (InterruptedException e) {
+            System.err.println("Error al esperar al monitor: " + e.getMessage());
+        }
+        
+        System.out.println("\nSimulación finalizada.");
+        mesa.mostrarEstado();
+    }
+}
+
+// Estados posibles de un filósofo
+enum Estado {
+    PENSANDO,
+    HAMBRIENTO,
+    COMIENDO
+}
+
+// Clase Mesa que gestiona los filósofos y tenedores
+class Mesa {
+    private int numFilosofos;
+    private Estado[] estados;
+    private Lock[] locks;
+    private Condition[] condVars;
+    private int[] comidas;
+    private boolean[] terminados;
+    private AtomicBoolean running;
+    private Random random;
+    
+    public Mesa(int n) {
+        numFilosofos = n;
+        estados = new Estado[n];
+        locks = new ReentrantLock[n];
+        condVars = new Condition[n];
+        comidas = new int[n];
+        terminados = new boolean[n];
+        running = new AtomicBoolean(true);
+        random = new Random();
+        
+        for (int i = 0; i < n; i++) {
+            estados[i] = Estado.PENSANDO;
+            locks[i] = new ReentrantLock();
+            condVars[i] = locks[i].newCondition();
+            comidas[i] = 0;
+            terminados[i] = false;
+        }
+    }
+    
+    // Función para obtener un número aleatorio entre min y max
+    private int obtenerAleatorio(int min, int max) {
+        return min + random.nextInt(max - min + 1);
+    }
+    
+    // Método para comprobar si un filósofo puede comer
+    public void comprobar(int id) {
+        int izquierda = (id + numFilosofos - 1) % numFilosofos;
+        int derecha = (id + 1) % numFilosofos;
+        
+        locks[id].lock();
+        try {
+            if (estados[id] == Estado.HAMBRIENTO && 
+                estados[izquierda] != Estado.COMIENDO && 
+                estados[derecha] != Estado.COMIENDO) {
+                
+                // El filósofo puede comer
+                estados[id] = Estado.COMIENDO;
+                comidas[id]++;
+                
+                // Notificar al filósofo que puede comer
+                condVars[id].signal();
+            }
+        } finally {
+            locks[id].unlock();
+        }
+    }
+    
+    // Método para tomar los tenedores
+    public void tomarTenedores(int id) {
+        int izquierda = (id + numFilosofos - 1) % numFilosofos;
+        int derecha = (id + 1) % numFilosofos;
+        
+        // Actualizar estado a hambriento
+        locks[id].lock();
+        try {
+            estados[id] = Estado.HAMBRIENTO;
+            System.out.println("Filósofo " + id + " tiene hambre.");
+        } finally {
+            locks[id].unlock();
+        }
+        
+        // Intentar tomar los tenedores
+        comprobar(id);
+        
+        // Esperar si no puede comer
+        locks[id].lock();
+        try {
+            while (estados[id] == Estado.HAMBRIENTO && running.get()) {
+                try {
+                    condVars[id].await();
+                } catch (InterruptedException e) {
+                    System.err.println("Filósofo " + id + " interrumpido mientras esperaba: " + e.getMessage());
+                    return;
+                }
+            }
+            
+            // Si se está terminando el programa, salir
+            if (!running.get()) {
+                return;
+            }
+            
+            System.out.println("Filósofo " + id + " toma tenedores y comienza a comer (comida #" + comidas[id] + ").");
+        } finally {
+            locks[id].unlock();
+        }
+    }
+    
+    // Método para soltar los tenedores
+    public void soltarTenedores(int id) {
+        int izquierda = (id + numFilosofos - 1) % numFilosofos;
+        int derecha = (id + 1) % numFilosofos;
+        
+        // Actualizar estado a pensando
+        locks[id].lock();
+        try {
+            estados[id] = Estado.PENSANDO;
+            System.out.println("Filósofo " + id + " suelta tenedores y vuelve a pensar.");
+        } finally {
+            locks[id].unlock();
+        }
+        
+        // Comprobar si los filósofos vecinos pueden comer
+        comprobar(izquierda);
+        comprobar(derecha);
+    }
+    
+    // Función principal para cada filósofo
+    public void filosofo(int id, int numComidas) {
+        System.out.println("Filósofo " + id + " se sienta en la mesa.");
+        
+        while (comidas[id] < numComidas && running.get()) {
+            // Pensar
+            int tiempoPensando = obtenerAleatorio(500, 2000);
+            System.out.println("Filósofo " + id + " está pensando por " + tiempoPensando + "ms.");
+            try {
+                Thread.sleep(tiempoPensando);
+            } catch (InterruptedException e) {
+                System.err.println("Filósofo " + id + " interrumpido mientras pensaba: " + e.getMessage());
+                break;
+            }
+            
+            // Intentar comer
+            tomarTenedores(id);
+            
+            if (!running.get()) break;
+            
+            // Comer
+            int tiempoComiendo = obtenerAleatorio(500, 1500);
+            System.out.println("Filósofo " + id + " está comiendo por " + tiempoComiendo + "ms.");
+            try {
+                Thread.sleep(tiempoComiendo);
+            } catch (InterruptedException e) {
+                System.err.println("Filósofo " + id + " interrumpido mientras comía: " + e.getMessage());
+                break;
+            }
+            
+            // Terminar de comer
+            soltarTenedores(id);
+        }
+        
+        terminados[id] = true;
+        System.out.println("Filósofo " + id + " ha terminado de comer " + comidas[id] + " veces.");
+    }
+    
+    // Método para verificar si todos los filósofos han terminado
+    public boolean todosTerminados() {
+        for (int i = 0; i < numFilosofos; i++) {
+            if (!terminados[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    // Método para detener la simulación
+    public void detener() {
+        running.set(false);
+        
+        // Despertar a todos los filósofos que estén esperando
+        for (int i = 0; i < numFilosofos; i++) {
+            locks[i].lock();
+            try {
+                condVars[i].signalAll();
+            } finally {
+                locks[i].unlock();
+            }
+        }
+    }
+    
+    // Método para mostrar el estado actual de la mesa
+    public void mostrarEstado() {
+        System.out.println("\n----- Estado de la Mesa -----");
+        System.out.printf("%-10s %-15s %-15s\n", "Filósofo", "Estado", "Comidas");
+        System.out.println("-------------------------------");
+        
+        for (int i = 0; i < numFilosofos; i++) {
+            String estadoStr = "";
+            locks[i].lock();
+            try {
+                switch (estados[i]) {
+                    case PENSANDO: estadoStr = "Pensando"; break;
+                    case HAMBRIENTO: estadoStr = "Hambriento"; break;
+                    case COMIENDO: estadoStr = "Comiendo"; break;
+                }
+            } finally {
+                locks[i].unlock();
+            }
+            
+            System.out.printf("%-10d %-15s %-15d\n", i, estadoStr, comidas[i]);
+        }
+        System.out.println("-------------------------------");
+    }
+}
